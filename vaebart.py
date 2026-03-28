@@ -531,8 +531,10 @@ class VAEBartModel(BartPretrainedModel):
         self.encoder = BartEncoder(config, self.shared)
         self.latent_dim = latent_dim
         self.decoder_layers = 12
-        self.mu = nn.Linear(config.d_model, latent_dim, bias=False)
-        self.logvar = nn.Linear(config.d_model, latent_dim, bias=False)
+        self.syn_mu = nn.Linear(latent_dim, latent_dim, bias=False)
+        self.syn_logvar = nn.Linear(latent_dim, latent_dim, bias=False)
+        self.sem_mu = nn.Linear(latent_dim, latent_dim, bias=False)
+        self.sem_logvar = nn.Linear(latent_dim, latent_dim, bias=False)
         self.embed_size_per_head = config.d_model // config.decoder_attention_heads
         self.memory_projection = nn.Linear(
             latent_dim,
@@ -704,7 +706,17 @@ class VAEBartModel(BartPretrainedModel):
         else:
           raise Exception("Wrong pooling strategy!")
 
-        z, mu, logvar = self.calculate_latent(pooled)
+        sem_hid, syn_hid = pooled[:,:512], pooled[:,512:]
+        sem_mu, sem_logvar = self.sem_mu(sem_hid), self.sem_logvar(sem_hid)
+        syn_mu, syn_logvar = self.syn_mu(syn_hid), self.syn_logvar(syn_hid)
+
+        sem_z = self.reparameterize(sem_mu, sem_logvar)
+        syn_z = self.reparameterize(syn_mu, syn_logvar)
+        z = sem_z * syn_z
+
+        sem_kl = self.regularization_loss(sem_mu, sem_logvar)
+        syn_kl = self.regularization_loss(syn_mu, syn_logvar)
+        kl_loss = (sem_kl+syn_kl)/2
 
         if past_key_values is None:
             latent_key_values = self.build_past(z)
@@ -740,7 +752,7 @@ class VAEBartModel(BartPretrainedModel):
             encoder_attentions=encoder_outputs.attentions,
         )
 
-        out.kl_loss = self.regularization_loss(mu, logvar)
+        out.kl_loss = kl_loss
         return out
 
 class VAEBartForConditionalGeneration(BartPretrainedModel):
@@ -757,7 +769,7 @@ class VAEBartForConditionalGeneration(BartPretrainedModel):
         self.model = VAEBartModel(config)
         self.register_buffer("final_logits_bias", torch.zeros((1, self.model.shared.num_embeddings)))
         self.lm_head = nn.Linear(config.d_model, self.model.shared.num_embeddings, bias=False)
-        self.beta = 100
+        self.beta = 250
 
         # Initialize weights and apply final processing
         self.post_init()
